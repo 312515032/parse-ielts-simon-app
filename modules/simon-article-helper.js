@@ -3,13 +3,15 @@ import { httpHelper } from "./http-helper.js";
 function toDollar(res) {
   return typeof res === "function" ? res : (res && res.$ ? res.$ : res);
 }
+
 function normUrl(u) {
   if (!u) return "";
   return /^https?:\/\//i.test(u) ? u : `https://ielts-simon.study${u.startsWith("/") ? "" : "/"}${u}`;
 }
 
 function parseListing($) {
-  const nodes = $("article, .post, .hentry, .loop-entry, .archive-post");
+  // 加強版 selector，多加 .entry
+  const nodes = $("article, .post, .hentry, .loop-entry, .archive-post, .entry");
   const items = [];
   nodes.each((_, el) => {
     const $el = $(el);
@@ -32,7 +34,9 @@ function parseListing($) {
     const $body =
       $el.find(".entry-content").first().length ? $el.find(".entry-content").first() :
       $el.find(".post-content").first().length ? $el.find(".post-content").first() :
+      $el.find(".content").first().length ? $el.find(".content").first() :
       $el.find("p").first();
+
     const body = ($body.text() || "").replace(/\s+/g, " ").trim().slice(0, 400);
 
     if (title && url) items.push({ title, url, date, body });
@@ -51,41 +55,46 @@ export let simonHelper = {
         continue;
       }
 
-      const u = new URL(url);
-      let path = u.pathname;
-      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+      try {
+        const u = new URL(url);
+        let path = u.pathname;
+        if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
-      // 多頁：/page/2/ 這種
-      const res = await httpHelper.get({
-        startPage: configs.startPage,
-        endPage: configs.endPage,
-        hostname: u.hostname,    // ielts-simon.study
-        path: path || "/",
-        subPath: "/page/",
-      });
-      const $ = toDollar(res);
+        const res = await httpHelper.get({
+          startPage: configs.startPage,
+          endPage: configs.endPage,
+          hostname: u.hostname,    // ielts-simon.study
+          path: path || "/",
+          subPath: "/page/",
+        });
+        const $ = toDollar(res);
 
-      let articles = parseListing($);
+        let articles = parseListing($);
 
-      if (configs.filter) {
-        articles = articles.filter(a =>
-          a.title.includes(configs.filter) || a.body.includes(configs.filter)
-        );
+        if (configs.filter) {
+          articles = articles.filter(a =>
+            a.title.includes(configs.filter) || a.body.includes(configs.filter)
+          );
+        }
+
+        pages.push({
+          fileName: cfg.fileName,
+          pageName: cfg.pageName,
+          articles,
+        });
+
+        console.log(`category ${cfg.pageName}: ${articles.length} articles`);
+      } catch (err) {
+        console.warn(`[warn] fetch failed for ${cfg.pageName}: ${err?.message || err}`);
+        pages.push({ fileName: cfg.fileName, pageName: cfg.pageName, articles: [] });
       }
-
-      pages.push({
-        fileName: cfg.fileName,
-        pageName: cfg.pageName,
-        articles,
-      });
-
-      console.log(`category ${cfg.pageName}: ${articles.length} articles`);
     }
 
     console.log(`grouped into ${pages.length} pages.`);
     return pages;
   },
 };
+
 
 
 /*
