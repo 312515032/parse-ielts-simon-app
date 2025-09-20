@@ -1,92 +1,103 @@
+// modules/simon-article-helper.js
 import { httpHelper } from "./http-helper.js";
 
-/**
- * 這版改成抓 https://ielts-simon.study 的首頁分頁 /page/N
- * 並用多組 CSS 選擇器 fallback 解析標題 / 連結 / 日期 / 摘要。
- * 另外加入對 configs.filter 的過濾（標題或內文包含該字串才保留）。
- */
+function pickFirst($el, selectors) {
+  for (const sel of selectors) {
+    const node = $el.find(sel).first();
+    if (node && (node.text()?.trim() || node.attr("href") || node.attr("datetime"))) {
+      return node;
+    }
+  }
+  return null;
+}
+
+async function fetchWithSite(site, startPage, endPage) {
+  return await httpHelper.get({
+    startPage,
+    endPage,
+    hostname: site.hostname,
+    path: site.path,
+    subPath: site.subPath,
+  });
+}
+
 export let simonHelper = {
   getPages: async function (configs) {
-    // 先抓首頁分頁；若之後發現站上是 /archives/page/N，只要把 path 換成 "/archives" 即可
-    const $ = await httpHelper.get({
-      startPage: configs.startPage,
-      endPage: configs.endPage,
-      hostname: "ielts-simon.study",
-      path: "",
-      subPath: "/page/",
-    });
+    const sites = [
+      { hostname: "ielts-simon.study", path: "/",         subPath: "page/" },
+      { hostname: "ielts-simon.study", path: "/archives/", subPath: "page/" },
+      { hostname: "www.ielts-simon.com", path: "/ielts-help-and-english-pr", subPath: "page/" },
+    ];
+
+    let $ = null;
+    for (const site of sites) {
+      try {
+        $ = await fetchWithSite(site, configs.startPage, configs.endPage);
+        if ($("article").length || $(".post").length || $(".entry-title").length) {
+          console.log(`Using site: https://${site.hostname}${site.path}`);
+          break;
+        }
+      } catch (e) {
+        // ignore and try next
+      }
+    }
+    if (!$) {
+      console.log("Unable to load any site.");
+      return [];
+    }
 
     const pages = [];
+    const articles = [];
 
-    // 先把所有文章收集到四個陣列
-    const articleDates = [];
-    const articleHeaders = [];
-    const articleUrls = [];
-    const articleBodies = [];
+    const articleNodes =
+      $("article").length ? $("article") :
+      $(".post").length ? $(".post") :
+      $(".hentry").length ? $(".hentry") :
+      $(".entry").length ? $(".entry") :
+      $(".content .post, .content article");
 
-    // 多種常見 WordPress 文章容器
-    const nodes = $("article, .post, .hentry, .archive-post, .post-card, .loop-entry");
-    nodes.each((i, el) => {
-      const $el = $(el);
+    articleNodes.each(function () {
+      const $a = $(this);
 
-      // 標題與連結（多個 fallback）
-      const aEl =
-        $el.find("h2.entry-title a").first().length ? $el.find("h2.entry-title a").first() :
-        $el.find("h2 a").first().length ? $el.find("h2 a").first() :
-        $el.find(".post-title a").first().length ? $el.find(".post-title a").first() :
-        $el.find("a").first();
+      const titleNode = pickFirst($a, [
+        "h1 a","h2 a","h3 a",".entry-title a",".post-title a","a[rel='bookmark']",
+      ]);
+      const url = titleNode?.attr("href") || "";
+      const title = (titleNode?.text() || "").trim();
 
-      const title = (aEl.text() || "").trim();
-      let url = (aEl.attr("href") || "").trim();
-      if (url && !/^https?:\/\//i.test(url)) url = `https://ielts-simon.study${url}`;
+      const dateNode = pickFirst($a, ["time[datetime]","time",".entry-date",".post-date"]);
+      const date = (dateNode?.attr("datetime") || dateNode?.text() || "").trim();
 
-      // 日期（可能沒有）
-      const timeEl =
-        $el.find("time[datetime]").first().length ? $el.find("time[datetime]").first() :
-        $el.find("time").first();
-      const date = (timeEl.text() || "").trim();
+      const bodyNode = pickFirst($a, [".entry-content",".post-content",".entry",".content",".post"]);
+      const bodyRaw = (bodyNode?.text() || "").replace(/\s+/g, " ").trim();
+      const body = bodyRaw.slice(0, 400);
 
-      // 內文 / 摘要
-      const bodyEl =
-        $el.find(".entry-content").first().length ? $el.find(".entry-content").first() :
-        $el.find(".post-content").first().length ? $el.find(".post-content").first() :
-        $el.find(".entry-summary").first().length ? $el.find(".entry-summary").first() :
-        $el.find("p").first();
-      const body = (bodyEl.text() || "").trim();
-
-      // 基本欄位不齊就跳過
-      if (!title || !url) return;
-
-      // 若有設定 filter，只保留標題或內文包含 filter 的文章
+      // 若有設定 filter：圖片 src/標題/內文命中才保留
       if (configs.filter) {
-        const hit = title.includes(configs.filter) || body.includes(configs.filter);
-        if (!hit) return;
+        const hasImg = $a.find(`img[src*="${configs.filter}"]`).length > 0;
+        const hitTxt = title.includes(configs.filter) || body.includes(configs.filter);
+        if (!hasImg && !hitTxt) return;
       }
 
-      articleHeaders.push(title);
-      articleUrls.push(url);
-      articleDates.push(date);
-      articleBodies.push(body);
+      if (title && url) {
+        const fixedUrl = /^https?:\/\//i.test(url) ? url : `https://ielts-simon.study${url}`;
+        articles.push({ title, url: fixedUrl, date, body });
+      }
     });
 
-    console.log(`found ${articleHeaders.length} articles.`);
+    console.log(`found ${articles.length} articles.`);
 
-    // 依 index.js 的 pages 設定把文章分組
-    configs.pages.forEach((cfg) => {
-      const page = { fileName: cfg.fileName, pageName: cfg.pageName, articles: [] };
+    // 依你的 pages 配置分組
+    configs.pages.forEach((pageCfg) => {
+      const page = { fileName: pageCfg.fileName, pageName: pageCfg.pageName, articles: [] };
+      const keys = (pageCfg.searchText || []).map((s) => s.toLowerCase());
 
-      for (let i = 0; i < articleHeaders.length; i++) {
-        const combined = `${articleHeaders[i]} ${articleBodies[i]}`;
-        const matched = cfg.searchText.some((kw) => combined.includes(kw));
-        if (matched) {
-          page.articles.push({
-            date: articleDates[i],
-            title: articleHeaders[i],
-            url: articleUrls[i],
-            body: articleBodies[i],
-          });
+      articles.forEach((a) => {
+        const hay = (a.title + " " + a.body).toLowerCase();
+        if (keys.length === 0 || keys.some((k) => hay.includes(k))) {
+          page.articles.push(a);
         }
-      }
+      });
 
       pages.push(page);
     });
@@ -95,6 +106,7 @@ export let simonHelper = {
     return pages;
   },
 };
+
 
 
 
