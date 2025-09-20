@@ -52,7 +52,7 @@ export async function httpsGet(hostname, path, headers) {
 
 export async function httpsPost(hostname, path, data) {
   return new Promise(async (resolve, reject) => {
-    const options = {
+    */const options = {
       hostname: hostname,
       path: path,
       port: 443,
@@ -61,7 +61,25 @@ export async function httpsPost(hostname, path, data) {
         "Content-Type": "application/json",
       },
     };
+    */
 
+    // 範例：組 options 時加入 headers
+    const options = {
+      hostname,
+      path: fullPath,
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+      },
+    };
+
+
+
+    
     const body = [];
 
     const req = request(options, (res) => {
