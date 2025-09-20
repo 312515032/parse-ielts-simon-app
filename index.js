@@ -4,6 +4,7 @@ import { generate } from "./modules/template-helper.js";
 var configs = {
   startPage: 1,
   endPage: 92,
+  filter:"img-01",
   pages: [
     {
       fileName: "index.html",
