@@ -55,14 +55,16 @@ export let simonHelper = {
 
     // 建立「分類名稱（小寫） → href」對照
     const catMap = new Map();
-    $home.find("a").each((_, a) => {
-      const text = ($home(a).text() || "").trim();
-      const href = $home(a).attr("href") || "";
+    $home("a").each((_, el) => {
+      const $a   = $home(el);
+      const text = ($a.text() || "").trim();
+      const href = $a.attr("href") || "";
       if (!text || !href) return;
       if (/ielts-simon\.study/.test(href) || href.startsWith("/")) {
         catMap.set(text.toLowerCase(), href);
       }
     });
+
 
     const pages = [];
 
