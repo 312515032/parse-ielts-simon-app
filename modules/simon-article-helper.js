@@ -1,18 +1,36 @@
-import { httpHelper } from "./http-helper.js";
+// 直接用原生 fetch + cheerio，不再依賴 httpHelper，避免 $ 不是 function 的問題
+import { load as cheerioLoad } from "cheerio";
 
-function toDollar(res) {
-  return typeof res === "function" ? res : (res && res.$ ? res.$ : res);
+/** 小工具：保證路徑末尾有 / */
+function ensureTrailingSlash(s) {
+  if (!s) return "/";
+  return s.endsWith("/") ? s : s + "/";
 }
 
-function normUrl(u) {
-  if (!u) return "";
-  return /^https?:\/\//i.test(u) ? u : `https://ielts-simon.study${u.startsWith("/") ? "" : "/"}${u}`;
+/** 以 Cheerio 取得 DOM（$） */
+async function fetchCheerio(url) {
+  const res = await fetch(url, {
+    headers: {
+      // 伪装浏览器，避免某些主机拒绝
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} for ${url}`);
+  }
+  const html = await res.text();
+  return cheerioLoad(html); // 這裡回來的一定是「可呼叫的」$
 }
 
+/** 解析分類列表頁：回傳 [{title,url,date,body}, ...] */
 function parseListing($) {
-  // 加強版 selector，多加 .entry
+  // 加強版 selector，涵蓋常見 WP 主題
   const nodes = $("article, .post, .hentry, .loop-entry, .archive-post, .entry");
   const items = [];
+
   nodes.each((_, el) => {
     const $el = $(el);
 
@@ -24,12 +42,23 @@ function parseListing($) {
       $el.find("a[rel='bookmark']").first();
 
     const title = ($t.text() || "").trim();
-    const url   = normUrl($t.attr("href") || "");
+    let url = ($t.attr("href") || "").trim();
+
+    // 相對連結轉絕對（若主題給的是相對路徑）
+    if (url && !/^https?:\/\//i.test(url)) {
+      // 嘗試從當前頁的 <base> 或 window.location
+      const base = $("base[href]").attr("href") || "";
+      if (base) {
+        try {
+          url = new URL(url, base).href;
+        } catch (_) {}
+      }
+    }
 
     const $time =
       $el.find("time[datetime]").first().length ? $el.find("time[datetime]").first() :
       $el.find("time").first();
-    const date  = ($time.attr("datetime") || $time.text() || "").trim();
+    const date = ($time.attr("datetime") || $time.text() || "").trim();
 
     const $body =
       $el.find(".entry-content").first().length ? $el.find(".entry-content").first() :
@@ -41,39 +70,63 @@ function parseListing($) {
 
     if (title && url) items.push({ title, url, date, body });
   });
+
   return items;
 }
 
 export let simonHelper = {
+  /**
+   * 依 configs.pages 的 categoryUrl 抓取多頁文章
+   * configs: { startPage, endPage, pages: [{ fileName, pageName, categoryUrl }] }
+   */
   getPages: async function (configs) {
     const pages = [];
 
     for (const cfg of configs.pages) {
-      const url = cfg.categoryUrl;
-      if (!url) {
+      const categoryUrl = cfg.categoryUrl;
+      if (!categoryUrl) {
         pages.push({ fileName: cfg.fileName, pageName: cfg.pageName, articles: [] });
         continue;
       }
 
       try {
-        const u = new URL(url);
-        let path = u.pathname;
-        if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+        const u = new URL(categoryUrl);
+        const origin = `${u.protocol}//${u.host}`;
+        let basePath = ensureTrailingSlash(u.pathname);
 
-        const res = await httpHelper.get({
-          startPage: configs.startPage,
-          endPage: configs.endPage,
-          hostname: u.hostname,    // ielts-simon.study
-          path: path || "/",
-          subPath: "/page/",
-        });
-        const $ = toDollar(res);
+        const collected = [];
+        const seen = new Set(); // 依 URL 去重
 
-        let articles = parseListing($);
+        // 逐頁抓：第 1 頁為原路徑；第 2+ 頁為 /page/N/
+        for (let p = configs.startPage; p <= configs.endPage; p++) {
+          const pagePath = p === 1 ? basePath : `${ensureTrailingSlash(basePath)}page/${p}/`;
+          const url = origin + pagePath;
 
+          // 取 DOM
+          const $ = await fetchCheerio(url);
+
+          // 解析列表
+          const list = parseListing($);
+
+          // 收集（去重）
+          for (const item of list) {
+            if (!seen.has(item.url)) {
+              seen.add(item.url);
+              collected.push(item);
+            }
+          }
+
+          // 若本頁已經沒有文章，提早停止（常見於到底）
+          if (list.length === 0) break;
+        }
+
+        // 可選：過濾（目前先不限制，避免抓不到）
+        let articles = collected;
         if (configs.filter) {
+          const key = String(configs.filter).toLowerCase();
           articles = articles.filter(a =>
-            a.title.includes(configs.filter) || a.body.includes(configs.filter)
+            (a.title || "").toLowerCase().includes(key) ||
+            (a.body || "").toLowerCase().includes(key)
           );
         }
 
@@ -94,6 +147,7 @@ export let simonHelper = {
     return pages;
   },
 };
+
 
 
 
