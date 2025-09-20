@@ -3,18 +3,21 @@ import { generate } from "./modules/template-helper.js";
 
 const configs = {
   startPage: 1,
-  endPage: 5,     // 先小一點測
-  filter: "",     // 先不要過濾，OK 再加
+  endPage: 5,    // 先小一點測通再拉大
+  filter: "",    // 先空白，確認抓得到再加關鍵字
 
-  // 直接指定分類 URL
   pages: [
-    { fileName: "reading.html",        pageName: "Reading",            categoryUrl: "https://ielts-simon.study/ielts-reading/" },
-    { fileName: "listening.html",      pageName: "Listening",          categoryUrl: "https://ielts-simon.study/ielts-listening/" },
-    { fileName: "speaking.html",       pageName: "Speaking",           categoryUrl: "https://ielts-simon.study/ielts-speaking/" },
-    { fileName: "writing-task-1.html", pageName: "Writing Task 1 (Ac)",categoryUrl: "https://ielts-simon.study/ielts-writing-task-1-academic/" },
-    { fileName: "index.html",          pageName: "Writing Task 2",     categoryUrl: "https://ielts-simon.study/ielts-writing-task-2/" },
+    { pageName: "Reading",            fileName: "reading.html",        categoryUrl: "https://ielts-simon.study/ielts-reading/" },
+    { pageName: "Listening",          fileName: "listening.html",      categoryUrl: "https://ielts-simon.study/ielts-listening/" },
+    { pageName: "Speaking",           fileName: "speaking.html",       categoryUrl: "https://ielts-simon.study/ielts-speaking/" },
+    { pageName: "Writing Task 1 (AC)",fileName: "writing-task-1.html", categoryUrl: "https://ielts-simon.study/ielts-writing-task-1-academic/" },
+    { pageName: "Writing Task 2",     fileName: "writing-task-2.html", categoryUrl: "https://ielts-simon.study/ielts-writing-task-2/" },
   ],
 };
+
+const pages = await simonHelper.getPages(configs);
+pages.forEach((page) => generate(page, configs));
+
 
 const pages = await simonHelper.getPages(configs);
 pages.forEach((page) => generate(page, configs));
