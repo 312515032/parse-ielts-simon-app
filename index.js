@@ -19,8 +19,6 @@ const pages = await simonHelper.getPages(configs);
 pages.forEach((page) => generate(page, configs));
 
 
-const pages = await simonHelper.getPages(configs);
-pages.forEach((page) => generate(page, configs));
 
 
 
