@@ -1,106 +1,113 @@
-// modules/simon-article-helper.js
+// 專門處理：從 ielts-simon.study 取分類 → 依分類抓多頁 → 解析文章列表
 import { httpHelper } from "./http-helper.js";
 
-function pickFirst($el, selectors) {
-  for (const sel of selectors) {
-    const node = $el.find(sel).first();
-    if (node && (node.text()?.trim() || node.attr("href") || node.attr("datetime"))) {
-      return node;
-    }
-  }
-  return null;
+// httpHelper.get 可能回傳 $ 或 { $ }；統一轉成可呼叫的 $
+function toDollar(res) {
+  return typeof res === "function" ? res : (res && res.$ ? res.$ : res);
+}
+function normUrl(u) {
+  if (!u) return "";
+  return /^https?:\/\//i.test(u) ? u : `https://ielts-simon.study${u.startsWith("/") ? "" : "/"}${u}`;
 }
 
-async function fetchWithSite(site, startPage, endPage) {
-  return await httpHelper.get({
-    startPage,
-    endPage,
-    hostname: site.hostname,
-    path: site.path,
-    subPath: site.subPath,
+// 解析分類列表頁：回傳 [{title,url,date,body}, ...]
+function parseListing($) {
+  const nodes = $("article, .post, .hentry, .loop-entry, .archive-post");
+  const items = [];
+  nodes.each((_, el) => {
+    const $el = $(el);
+
+    const $t =
+      $el.find("h2.entry-title a").first().length ? $el.find("h2.entry-title a").first() :
+      $el.find("h1 a").first().length ? $el.find("h1 a").first() :
+      $el.find("h2 a").first().length ? $el.find("h2 a").first() :
+      $el.find(".post-title a").first().length ? $el.find(".post-title a").first() :
+      $el.find("a[rel='bookmark']").first();
+
+    const title = ($t.text() || "").trim();
+    const url   = normUrl($t.attr("href") || "");
+
+    const $time =
+      $el.find("time[datetime]").first().length ? $el.find("time[datetime]").first() :
+      $el.find("time").first();
+    const date  = ($time.attr("datetime") || $time.text() || "").trim();
+
+    const $body =
+      $el.find(".entry-content").first().length ? $el.find(".entry-content").first() :
+      $el.find(".post-content").first().length ? $el.find(".post-content").first() :
+      $el.find("p").first();
+    const body = ($body.text() || "").replace(/\s+/g, " ").trim().slice(0, 400);
+
+    if (title && url) items.push({ title, url, date, body });
   });
+  return items;
 }
 
 export let simonHelper = {
   getPages: async function (configs) {
-    const sites = [
-      { hostname: "ielts-simon.study", path: "/",         subPath: "page/" },
-      { hostname: "ielts-simon.study", path: "/archives/", subPath: "page/" },
-      { hostname: "www.ielts-simon.com", path: "/ielts-help-and-english-pr", subPath: "page/" },
-    ];
+    // 1) 先抓首頁，只為了拿右欄 Index 的分類文字與超連結
+    const homeRes = await httpHelper.get({
+      startPage: 1, endPage: 1,
+      hostname: "ielts-simon.study",
+      path: "/", subPath: ""
+    });
+    const $home = toDollar(homeRes);
 
-    let $ = null;
-    for (const site of sites) {
-      try {
-        $ = await fetchWithSite(site, configs.startPage, configs.endPage);
-        if ($("article").length || $(".post").length || $(".entry-title").length) {
-          console.log(`Using site: https://${site.hostname}${site.path}`);
-          break;
-        }
-      } catch (e) {
-        // ignore and try next
+    // 建立「分類名稱（小寫） → href」對照
+    const catMap = new Map();
+    $home.find("a").each((_, a) => {
+      const text = ($home(a).text() || "").trim();
+      const href = $home(a).attr("href") || "";
+      if (!text || !href) return;
+      if (/ielts-simon\.study/.test(href) || href.startsWith("/")) {
+        catMap.set(text.toLowerCase(), href);
       }
-    }
-    if (!$) {
-      console.log("Unable to load any site.");
-      return [];
-    }
+    });
 
     const pages = [];
-    const articles = [];
 
-    const articleNodes =
-      $("article").length ? $("article") :
-      $(".post").length ? $(".post") :
-      $(".hentry").length ? $(".hentry") :
-      $(".entry").length ? $(".entry") :
-      $(".content .post, .content article");
+    // 2) 只抓 configs.pages 指定的那 5 個分類
+    for (const cfg of configs.pages) {
+      const key = (cfg.categoryText || "").toLowerCase();
+      const href = catMap.get(key);
+      if (!href) {
+        console.log(`[warn] category not found on homepage: ${cfg.categoryText}`);
+        pages.push({ fileName: cfg.fileName, pageName: cfg.pageName, articles: [] });
+        continue;
+      }
 
-    articleNodes.each(function () {
-      const $a = $(this);
+      // 拆 href 為 hostname/path；分頁採用 /page/N/
+      const u = new URL(normUrl(href));
+      let path = u.pathname;
+      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
-      const titleNode = pickFirst($a, [
-        "h1 a","h2 a","h3 a",".entry-title a",".post-title a","a[rel='bookmark']",
-      ]);
-      const url = titleNode?.attr("href") || "";
-      const title = (titleNode?.text() || "").trim();
+      const listRes = await httpHelper.get({
+        startPage: configs.startPage,
+        endPage: configs.endPage,
+        hostname: u.hostname,    // ielts-simon.study
+        path: path || "/",       // 例如 /reading、/listening、/writing-task-2 或 /category/xxx
+        subPath: "/page/",       // 分頁樣式
+      });
+      const $ = toDollar(listRes);
 
-      const dateNode = pickFirst($a, ["time[datetime]","time",".entry-date",".post-date"]);
-      const date = (dateNode?.attr("datetime") || dateNode?.text() || "").trim();
+      let articles = parseListing($);
 
-      const bodyNode = pickFirst($a, [".entry-content",".post-content",".entry",".content",".post"]);
-      const bodyRaw = (bodyNode?.text() || "").replace(/\s+/g, " ").trim();
-      const body = bodyRaw.slice(0, 400);
-
-      // 若有設定 filter：圖片 src/標題/內文命中才保留
+      // 可選：關鍵字/圖片過濾（先建議留空以免抓不到）
       if (configs.filter) {
-        const hasImg = $a.find(`img[src*="${configs.filter}"]`).length > 0;
-        const hitTxt = title.includes(configs.filter) || body.includes(configs.filter);
-        if (!hasImg && !hitTxt) return;
+        articles = articles.filter(a =>
+          a.title.includes(configs.filter) ||
+          a.body.includes(configs.filter)
+        );
       }
 
-      if (title && url) {
-        const fixedUrl = /^https?:\/\//i.test(url) ? url : `https://ielts-simon.study${url}`;
-        articles.push({ title, url: fixedUrl, date, body });
-      }
-    });
-
-    console.log(`found ${articles.length} articles.`);
-
-    // 依你的 pages 配置分組
-    configs.pages.forEach((pageCfg) => {
-      const page = { fileName: pageCfg.fileName, pageName: pageCfg.pageName, articles: [] };
-      const keys = (pageCfg.searchText || []).map((s) => s.toLowerCase());
-
-      articles.forEach((a) => {
-        const hay = (a.title + " " + a.body).toLowerCase();
-        if (keys.length === 0 || keys.some((k) => hay.includes(k))) {
-          page.articles.push(a);
-        }
+      pages.push({
+        fileName: cfg.fileName,
+        pageName: cfg.pageName,
+        articles,
       });
 
-      pages.push(page);
-    });
+      console.log(`category ${cfg.categoryText}: ${articles.length} articles`);
+    }
 
     console.log(`grouped into ${pages.length} pages.`);
     return pages;
