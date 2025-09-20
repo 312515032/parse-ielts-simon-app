@@ -1,152 +1,121 @@
-// 直接用原生 fetch + cheerio，不再依賴 httpHelper，避免 $ 不是 function 的問題
-import { load as cheerioLoad } from "cheerio";
+// modules/simon-article-helper.js
+import { httpHelper } from "./http-helper.js";
 
-/** 小工具：保證路徑末尾有 / */
-function ensureTrailingSlash(s) {
-  if (!s) return "/";
-  return s.endsWith("/") ? s : s + "/";
+/** 可能回傳的是函式($)或物件({ $ })，統一拿到 cheerio 的 $ */
+function toDollar(res) {
+  if (!res) return null;
+  if (typeof res === "function") return res;
+  if (typeof res.$ === "function") return res.$;
+  return null;
 }
 
-/** 以 Cheerio 取得 DOM（$） */
-async function fetchCheerio(url) {
-  const res = await fetch(url, {
-    headers: {
-      // 伪装浏览器，避免某些主机拒绝
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} for ${url}`);
-  }
-  const html = await res.text();
-  return cheerioLoad(html); // 這裡回來的一定是「可呼叫的」$
+function normUrl(u) {
+  if (!u) return "";
+  return /^https?:\/\//i.test(u) ? u : `https://ielts-simon.study${u.startsWith("/") ? "" : "/"}${u}`;
 }
 
-/** 解析分類列表頁：回傳 [{title,url,date,body}, ...] */
-function parseListing($) {
-  // 加強版 selector，涵蓋常見 WP 主題
-  const nodes = $("article, .post, .hentry, .loop-entry, .archive-post, .entry");
+/** 從類型為「索引頁」的內容區塊把所有文章連結抓出來 */
+function parseIndexPage($, basePath) {
+  // 這些索引頁在主內容都放在 .entry-content 下面，
+  // 每個小段落是文字 + 一串 <a> 清單（包含折疊的 .et_pb_toggle_content）
+  // 參考你提供的 Reading 頁 HTML 結構（Divi 主題） :contentReference[oaicite:0]{index=0}
+  const anchors = new Set();
   const items = [];
 
-  nodes.each((_, el) => {
-    const $el = $(el);
+  // 只掃主內容，避免掃到導覽列 / 側欄
+  $(".entry-content a").each((_, el) => {
+    const $a = $(el);
+    const href = ($a.attr("href") || "").trim();
+    const title = ($a.text() || "").trim();
 
-    const $t =
-      $el.find("h2.entry-title a").first().length ? $el.find("h2.entry-title a").first() :
-      $el.find("h1 a").first().length ? $el.find("h1 a").first() :
-      $el.find("h2 a").first().length ? $el.find("h2 a").first() :
-      $el.find(".post-title a").first().length ? $el.find(".post-title a").first() :
-      $el.find("a[rel='bookmark']").first();
+    if (!href || !title) return;
 
-    const title = ($t.text() || "").trim();
-    let url = ($t.attr("href") || "").trim();
+    const url = normUrl(href);
 
-    // 相對連結轉絕對（若主題給的是相對路徑）
-    if (url && !/^https?:\/\//i.test(url)) {
-      // 嘗試從當前頁的 <base> 或 window.location
-      const base = $("base[href]").attr("href") || "";
-      if (base) {
-        try {
-          url = new URL(url, base).href;
-        } catch (_) {}
+    // 只收本站連結 + 過濾一些明顯非文章的東西（可再按需要加條件）
+    const isSameSite = url.startsWith("https://ielts-simon.study/");
+    const looksLikeArticle = !url.includes("#") && !url.endsWith("/feed/");
+
+    if (isSameSite && looksLikeArticle) {
+      // 去重（同一頁面常重複出現同一連結）
+      const key = `${title}::${url}`;
+      if (!anchors.has(key)) {
+        anchors.add(key);
+        items.push({
+          title,
+          url,
+          date: "",        // 索引頁沒有日期，先留空
+          body: ""         // 沒有摘要，先留空
+        });
       }
     }
-
-    const $time =
-      $el.find("time[datetime]").first().length ? $el.find("time[datetime]").first() :
-      $el.find("time").first();
-    const date = ($time.attr("datetime") || $time.text() || "").trim();
-
-    const $body =
-      $el.find(".entry-content").first().length ? $el.find(".entry-content").first() :
-      $el.find(".post-content").first().length ? $el.find(".post-content").first() :
-      $el.find(".content").first().length ? $el.find(".content").first() :
-      $el.find("p").first();
-
-    const body = ($body.text() || "").replace(/\s+/g, " ").trim().slice(0, 400);
-
-    if (title && url) items.push({ title, url, date, body });
   });
 
-  return items;
+  // 這些索引頁有時會把同一篇放在多個段落，做個基本去重（以 URL 為準）
+  const seenUrl = new Set();
+  return items.filter(it => {
+    if (seenUrl.has(it.url)) return false;
+    seenUrl.add(it.url);
+    return true;
+  });
 }
 
 export let simonHelper = {
-  /**
-   * 依 configs.pages 的 categoryUrl 抓取多頁文章
-   * configs: { startPage, endPage, pages: [{ fileName, pageName, categoryUrl }] }
-   */
+  /** 針對 configs.pages[i].categoryUrl 逐頁抓取 */
   getPages: async function (configs) {
     const pages = [];
 
     for (const cfg of configs.pages) {
-      const categoryUrl = cfg.categoryUrl;
-      if (!categoryUrl) {
+      const url = cfg.categoryUrl;
+      if (!url) {
         pages.push({ fileName: cfg.fileName, pageName: cfg.pageName, articles: [] });
         continue;
       }
 
-      try {
-        const u = new URL(categoryUrl);
-        const origin = `${u.protocol}//${u.host}`;
-        let basePath = ensureTrailingSlash(u.pathname);
+      const u = new URL(url);
+      let path = u.pathname || "/";
+      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
-        const collected = [];
-        const seen = new Set(); // 依 URL 去重
+      // 這些索引頁本身通常只有 1 頁；保險起見仍沿用分頁參數
+      const res = await httpHelper.get({
+        startPage: configs.startPage,
+        endPage: configs.endPage,
+        hostname: u.hostname,   // ielts-simon.study
+        path,                    // 例如 /ielts-reading
+        subPath: "/page/",       // 若有分頁會是 /page/N/
+      });
 
-        // 逐頁抓：第 1 頁為原路徑；第 2+ 頁為 /page/N/
-        for (let p = configs.startPage; p <= configs.endPage; p++) {
-          const pagePath = p === 1 ? basePath : `${ensureTrailingSlash(basePath)}page/${p}/`;
-          const url = origin + pagePath;
-
-          // 取 DOM
-          const $ = await fetchCheerio(url);
-
-          // 解析列表
-          const list = parseListing($);
-
-          // 收集（去重）
-          for (const item of list) {
-            if (!seen.has(item.url)) {
-              seen.add(item.url);
-              collected.push(item);
-            }
-          }
-
-          // 若本頁已經沒有文章，提早停止（常見於到底）
-          if (list.length === 0) break;
-        }
-
-        // 可選：過濾（目前先不限制，避免抓不到）
-        let articles = collected;
-        if (configs.filter) {
-          const key = String(configs.filter).toLowerCase();
-          articles = articles.filter(a =>
-            (a.title || "").toLowerCase().includes(key) ||
-            (a.body || "").toLowerCase().includes(key)
-          );
-        }
-
-        pages.push({
-          fileName: cfg.fileName,
-          pageName: cfg.pageName,
-          articles,
-        });
-
-        console.log(`category ${cfg.pageName}: ${articles.length} articles`);
-      } catch (err) {
-        console.warn(`[warn] fetch failed for ${cfg.pageName}: ${err?.message || err}`);
+      const $ = toDollar(res);
+      if (!$) {
+        console.warn(`[warn] cannot get cheerio instance for ${cfg.pageName}`);
         pages.push({ fileName: cfg.fileName, pageName: cfg.pageName, articles: [] });
+        continue;
       }
+
+      let articles = parseIndexPage($, path);
+
+      // 若你還想做關鍵字篩選，可沿用原本的 filter
+      if (configs.filter) {
+        const f = configs.filter.toLowerCase();
+        articles = articles.filter(a =>
+          a.title.toLowerCase().includes(f)
+          || (a.body || "").toLowerCase().includes(f)
+        );
+      }
+
+      console.log(`category ${cfg.pageName}: ${articles.length} articles`);
+      pages.push({
+        fileName: cfg.fileName,
+        pageName: cfg.pageName,
+        articles,
+      });
     }
 
     console.log(`grouped into ${pages.length} pages.`);
     return pages;
   },
 };
+
 
 
 
